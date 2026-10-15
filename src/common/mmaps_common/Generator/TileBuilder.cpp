@@ -23,6 +23,8 @@
 #include "StringFormat.h"
 #include "VMapManager.h"
 #include <DetourNavMeshBuilder.h>
+#include <initializer_list>
+#include <vector>
 
 namespace
 {
@@ -200,6 +202,87 @@ namespace MMAP
         rcClearUnwalkableTriangles(&m_rcContext, tileCfg.walkableSlopeAngle, tVerts, tVertCount, tTris, tTriCount, triFlags.get());
         rcMarkWalkableTriangles(&m_rcContext, tileCfg.walkableSlopeAngleNotSteep, tVerts, tVertCount, tTris, tTriCount, triFlags.get(), NAV_AREA_GROUND);
 
+        // Calculate the per tile bounding boxes (including border padding), exactly as the heightfield of each
+        // sub-tile is created below. X depends only on the column and Z only on the row.
+        std::vector<float> subTileMinX(TILES_PER_MAP), subTileMaxX(TILES_PER_MAP);
+        std::vector<float> subTileMinZ(TILES_PER_MAP), subTileMaxZ(TILES_PER_MAP);
+        for (int i = 0; i < TILES_PER_MAP; ++i)
+        {
+            float minX = config.bmin[0] + i * float(config.tileSize * config.cs);
+            float minZ = config.bmin[2] + i * float(config.tileSize * config.cs);
+            float maxX = config.bmin[0] + (i + 1) * float(config.tileSize * config.cs);
+            float maxZ = config.bmin[2] + (i + 1) * float(config.tileSize * config.cs);
+
+            minX -= tileCfg.borderSize * tileCfg.cs;
+            minZ -= tileCfg.borderSize * tileCfg.cs;
+            maxX += tileCfg.borderSize * tileCfg.cs;
+            maxZ += tileCfg.borderSize * tileCfg.cs;
+
+            subTileMinX[i] = minX;
+            subTileMaxX[i] = maxX;
+            subTileMinZ[i] = minZ;
+            subTileMaxZ[i] = maxZ;
+        }
+
+        // Bin triangle indices per sub-tile. rasterizeTri() skips a triangle whose bounding box does not overlap
+        // the heightfield bounds (overlapBounds: reject when amin > bmax || amax < bmin, per axis), so a triangle
+        // can only contribute to the sub-tiles it overlaps in X and Z. Use the same inclusive test (and the same
+        // negated form, so NaN is kept) and keep ascending triangle order inside every bin.
+        // The Y axis is not binned: the Recast test still runs for the triangles that are rasterized.
+        auto binTriangles = [&](float const* verts, int const* tris, int triCount)
+        {
+            std::vector<std::vector<int>> bins(TILES_PER_MAP * TILES_PER_MAP);
+            std::vector<char> inColumn(TILES_PER_MAP), inRow(TILES_PER_MAP);
+            for (int i = 0; i < triCount; ++i)
+            {
+                float const* v0 = &verts[tris[i * 3 + 0] * 3];
+                float const* v1 = &verts[tris[i * 3 + 1] * 3];
+                float const* v2 = &verts[tris[i * 3 + 2] * 3];
+
+                // same min/max selection as rcVmin/rcVmax in rasterizeTri
+                float tminX = v0[0], tmaxX = v0[0], tminZ = v0[2], tmaxZ = v0[2];
+                for (float const* v : { v1, v2 })
+                {
+                    if (v[0] < tminX) tminX = v[0];
+                    if (v[2] < tminZ) tminZ = v[2];
+                    if (v[0] > tmaxX) tmaxX = v[0];
+                    if (v[2] > tmaxZ) tmaxZ = v[2];
+                }
+
+                for (int k = 0; k < TILES_PER_MAP; ++k)
+                {
+                    inColumn[k] = !(subTileMinX[k] > tmaxX || subTileMaxX[k] < tminX);
+                    inRow[k] = !(subTileMinZ[k] > tmaxZ || subTileMaxZ[k] < tminZ);
+                }
+
+                for (int ty = 0; ty < TILES_PER_MAP; ++ty)
+                    if (inRow[ty])
+                        for (int tx = 0; tx < TILES_PER_MAP; ++tx)
+                            if (inColumn[tx])
+                                bins[tx + ty * TILES_PER_MAP].push_back(i);
+            }
+            return bins;
+        };
+
+        std::vector<std::vector<int>> solidBins = binTriangles(tVerts, tTris, tTriCount);
+        std::vector<std::vector<int>> liquidBins = binTriangles(lVerts, lTris, lTriCount);
+
+        // compacted per sub-tile triangle lists (reused between sub-tiles)
+        std::vector<int> binTris;
+        std::vector<unsigned char> binAreas;
+        auto gatherBin = [&](std::vector<int> const& bin, int const* tris, unsigned char const* areas)
+        {
+            binTris.clear();
+            binAreas.clear();
+            for (int triIndex : bin)
+            {
+                binTris.push_back(tris[triIndex * 3 + 0]);
+                binTris.push_back(tris[triIndex * 3 + 1]);
+                binTris.push_back(tris[triIndex * 3 + 2]);
+                binAreas.push_back(areas[triIndex]);
+            }
+        };
+
         // build all tiles
         for (int y = 0; y < TILES_PER_MAP; ++y)
         {
@@ -207,16 +290,11 @@ namespace MMAP
             {
                 Tile& tile = tiles[x + y * TILES_PER_MAP];
 
-                // Calculate the per tile bounding box.
-                tileCfg.bmin[0] = config.bmin[0] + x * float(config.tileSize * config.cs);
-                tileCfg.bmin[2] = config.bmin[2] + y * float(config.tileSize * config.cs);
-                tileCfg.bmax[0] = config.bmin[0] + (x + 1) * float(config.tileSize * config.cs);
-                tileCfg.bmax[2] = config.bmin[2] + (y + 1) * float(config.tileSize * config.cs);
-
-                tileCfg.bmin[0] -= tileCfg.borderSize * tileCfg.cs;
-                tileCfg.bmin[2] -= tileCfg.borderSize * tileCfg.cs;
-                tileCfg.bmax[0] += tileCfg.borderSize * tileCfg.cs;
-                tileCfg.bmax[2] += tileCfg.borderSize * tileCfg.cs;
+                // per tile bounding box (precomputed above, shared with the triangle binning)
+                tileCfg.bmin[0] = subTileMinX[x];
+                tileCfg.bmin[2] = subTileMinZ[y];
+                tileCfg.bmax[0] = subTileMaxX[x];
+                tileCfg.bmax[2] = subTileMaxZ[y];
 
                 // build heightfield
                 tile.solid = rcAllocHeightfield();
@@ -226,14 +304,16 @@ namespace MMAP
                     continue;
                 }
 
-                rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, tTris, triFlags.get(), tTriCount, *tile.solid, config.walkableClimb);
+                gatherBin(solidBins[x + y * TILES_PER_MAP], tTris, triFlags.get());
+                rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), *tile.solid, config.walkableClimb);
 
                 rcFilterLowHangingWalkableObstacles(&m_rcContext, config.walkableClimb, *tile.solid);
                 rcFilterLedgeSpans(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid);
                 rcFilterWalkableLowHeightSpans(&m_rcContext, tileCfg.walkableHeight, *tile.solid);
 
                 // add liquid triangles
-                rcRasterizeTriangles(&m_rcContext, lVerts, lVertCount, lTris, lTriFlags, lTriCount, *tile.solid, config.walkableClimb);
+                gatherBin(liquidBins[x + y * TILES_PER_MAP], lTris, lTriFlags);
+                rcRasterizeTriangles(&m_rcContext, lVerts, lVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), *tile.solid, config.walkableClimb);
 
                 // compact heightfield spans
                 tile.chf = rcAllocCompactHeightfield();
