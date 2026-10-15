@@ -14,6 +14,13 @@ R"(Generator command line args
                                     "map_id tile_x,tile_y (start_x start_y start_z) (end_x end_y end_z) size  //optional comments"
                                     Single mesh connection per line.
 
+--incremental        [dir]           Clone tiles whose inputs did not change since the run that wrote
+                                    <dir>/mmaps/.inputs.tsv instead of building them (implies --write-inputs).
+
+--write-inputs      []              Write mmaps/.inputs.tsv with a digest of the inputs of every tile.
+
+--dump-inputs       []              Print the digest and inputs of the requested tiles, build nothing.
+
 --silent            []              Make us script friendly. Do not wait for user input
                                     on error or completion.
 

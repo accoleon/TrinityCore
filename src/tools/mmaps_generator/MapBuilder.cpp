@@ -16,6 +16,7 @@
  */
 
 #include "MapBuilder.h"
+#include "Incremental.h"
 #include "Log.h"
 #include "MapDefines.h"
 #include "MapTree.h"
@@ -502,7 +503,13 @@ namespace MMAP
 
         std::string fileName = Trinity::StringFormat("{}/mmaps/{:04}.mmap", m_outputDirectory.generic_string(), mapID);
 
-        auto file = Trinity::make_unique_ptr_with_deleter<&::fclose>(fopen(fileName.c_str(), "wb"));
+        // --dump-inputs builds nothing and writes nothing
+#ifdef _WIN32
+        char const* mmapPath = sIncrementalOptions.dumpInputs ? "NUL" : fileName.c_str();
+#else
+        char const* mmapPath = sIncrementalOptions.dumpInputs ? "/dev/null" : fileName.c_str();
+#endif
+        auto file = Trinity::make_unique_ptr_with_deleter<&::fclose>(fopen(mmapPath, "wb"));
         if (!file)
         {
             dtFreeNavMesh(navMesh);
@@ -609,6 +616,10 @@ namespace MMAP
     /**************************************************************************/
     bool MapTileBuilder::shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY) const
     {
+        // every tile is digested and either cloned or built, so the resume-skip (which trusts any existing file) is off
+        if (sIncrementalOptions.incremental || sIncrementalOptions.writeSidecar || sIncrementalOptions.dumpInputs)
+            return false;
+
         std::string fileName = Trinity::StringFormat("{}/mmaps/{:04}_{:02}_{:02}.mmtile", m_outputDirectory.generic_string(), mapID, tileX, tileY);
         auto file = Trinity::make_unique_ptr_with_deleter<&::fclose>(fopen(fileName.c_str(), "rb"));
         if (!file)

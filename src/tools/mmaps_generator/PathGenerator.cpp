@@ -19,16 +19,19 @@
 #include "DB2FileLoader.h"
 #include "DB2FileSystemSource.h"
 #include "ExtractorDB2LoadInfo.h"
+#include "Incremental.h"
 #include "IoContext.h"
 #include "Locales.h"
 #include "Log.h"
 #include "MapBuilder.h"
 #include "Memory.h"
 #include "PathCommon.h"
+#include "StringFormat.h"
 #include "Timer.h"
 #include "Util.h"
 #include "VMapManager.h"
 #include <boost/filesystem/operations.hpp>
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -326,6 +329,24 @@ bool handleArgs(int argc, char** argv,
 
             outputDirectory = param;
         }
+        else if (strcmp(argv[i], "--incremental") == 0)
+        {
+            param = argv[++i];
+            if (!param)
+                return false;
+
+            MMAP::sIncrementalOptions.incremental = true;
+            MMAP::sIncrementalOptions.writeSidecar = true;
+            MMAP::sIncrementalOptions.prevDir = param;
+        }
+        else if (strcmp(argv[i], "--write-inputs") == 0)
+        {
+            MMAP::sIncrementalOptions.writeSidecar = true;
+        }
+        else if (strcmp(argv[i], "--dump-inputs") == 0)
+        {
+            MMAP::sIncrementalOptions.dumpInputs = true;
+        }
         else if (strcmp(argv[i], "--allowDebug") == 0)
         {
             allowDebug = true;
@@ -491,6 +512,29 @@ int main(int argc, char** argv)
     MMAP::CreateVMapManager = &MMAP::VMapFactory::CreateVMapManager;
     MMAP::TerrainBuilder::EnableDecodedMapTileCache(true);
 
+    {
+        // the digest inputs that are the same for every tile
+        std::string globalInputs = Trinity::StringFormat("maxAngle={} maxAngleNotSteep={} skipLiquid={} bigBaseUnit={} debugOutput={}\n",
+            maxAngle ? Trinity::StringFormat("{:a}", *maxAngle) : "default", maxAngleNotSteep ? Trinity::StringFormat("{:a}", *maxAngleNotSteep) : "default",
+            skipLiquid, bigBaseUnit, debugOutput);
+        std::vector<std::pair<uint32, uint8>> liquids(_liquidTypes.begin(), _liquidTypes.end());
+        std::sort(liquids.begin(), liquids.end());
+        for (auto const& [id, soundBank] : liquids)
+            globalInputs += Trinity::StringFormat("liquid {} {}\n", id, soundBank);
+        MMAP::IncrementalState::Init(inputDirectory, outputDirectory, globalInputs, [](uint32 mapId, MMAP::IncrementalMapInfo& info)
+        {
+            auto itr = MMAP::sMapStore.find(mapId);
+            if (itr == MMAP::sMapStore.end())
+                return false;
+
+            info.MapType = itr->second.MapType;
+            info.InstanceType = itr->second.InstanceType;
+            info.ParentMapID = itr->second.ParentMapID;
+            info.Flags = itr->second.Flags;
+            return true;
+        });
+    }
+
     MMAP::MapBuilder builder(inputDirectory, outputDirectory, maxAngle, maxAngleNotSteep, skipLiquid, skipContinents, skipJunkMaps,
                        skipBattlegrounds, debugOutput, bigBaseUnit, mapnum, offMeshInputPath, threads);
 
@@ -503,6 +547,8 @@ int main(int argc, char** argv)
         builder.buildMaps(uint32(mapnum));
     else
         builder.buildMaps({});
+
+    MMAP::IncrementalState::Finish();
 
     if (!silent)
         TC_LOG_INFO("tool.mmapgen", "Finished. MMAPS were built in {}", secsToTimeString(GetMSTimeDiffToNow(start) / 1000));
