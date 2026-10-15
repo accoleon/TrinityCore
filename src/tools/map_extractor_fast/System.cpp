@@ -38,6 +38,7 @@
 #include <boost/filesystem/path.hpp>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <bitset>
 #include <mutex>
 #include <thread>
@@ -56,7 +57,10 @@
 std::shared_ptr<CASC::Storage> CascStorage;
 // item 535 G7: number of ADT conversion threads (-t), 0 = hardware concurrency
 unsigned CONF_threads = 0;
-std::mutex CascLock;
+std::mutex CascLock;                 // only guards the fallback to the main storage when a worker cannot open its own
+int CascLocaleOpened = -1;           // locale of the main storage, reused for the per-worker storages
+CASC::Storage* OpenCascStorageHandle(int locale);
+std::atomic<uint64_t> TimeOpenNs{ 0 }, TimeLoadNs{ 0 }, TimeConvertNs{ 0 };
 
 struct MapEntry
 {
@@ -1048,30 +1052,52 @@ bool ConvertADT(ChunkedFile& adt, std::string const& mapName, std::string const&
     return true;
 }
 
-bool ConvertADT(std::string const& fileName, std::string const& mapName, std::string const& outputPath, int gx, int gy, uint32 build, bool ignoreDeepWater)
+using SteadyClock = std::chrono::steady_clock;
+
+static uint64_t NsSince(SteadyClock::time_point t)
 {
-    ChunkedFile adt;
-
-    {
-        std::lock_guard<std::mutex> lock(CascLock);
-        if (!adt.loadFile(CascStorage, fileName))
-            return false;
-    }
-
-    return ConvertADT(adt, mapName, outputPath, gx, gy, build, ignoreDeepWater);
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - t).count());
 }
 
-bool ConvertADT(uint32 fileDataId, std::string const& mapName, std::string const& outputPath, int gx, int gy, uint32 build, bool ignoreDeepWater)
+// storage: the calling worker's own CASC storage (see ExtractMaps); no lock is taken for it
+bool ConvertADT(std::shared_ptr<CASC::Storage> const& storage, bool shared, std::string const& fileName, std::string const& mapName, std::string const& outputPath, int gx, int gy, uint32 build, bool ignoreDeepWater)
 {
     ChunkedFile adt;
 
+    auto t0 = SteadyClock::now();
     {
-        std::lock_guard<std::mutex> lock(CascLock);
-        if (!adt.loadFile(CascStorage, fileDataId, Trinity::StringFormat("Map {} grid [{},{}]", mapName, gx, gy)))
+        std::unique_lock<std::mutex> lock(CascLock, std::defer_lock);
+        if (shared)
+            lock.lock();
+        if (!adt.loadFile(storage, fileName))
             return false;
     }
+    TimeLoadNs += NsSince(t0);
 
-    return ConvertADT(adt, mapName, outputPath, gx, gy, build, ignoreDeepWater);
+    t0 = SteadyClock::now();
+    bool ok = ConvertADT(adt, mapName, outputPath, gx, gy, build, ignoreDeepWater);
+    TimeConvertNs += NsSince(t0);
+    return ok;
+}
+
+bool ConvertADT(std::shared_ptr<CASC::Storage> const& storage, bool shared, uint32 fileDataId, std::string const& mapName, std::string const& outputPath, int gx, int gy, uint32 build, bool ignoreDeepWater)
+{
+    ChunkedFile adt;
+
+    auto t0 = SteadyClock::now();
+    {
+        std::unique_lock<std::mutex> lock(CascLock, std::defer_lock);
+        if (shared)
+            lock.lock();
+        if (!adt.loadFile(storage, fileDataId, Trinity::StringFormat("Map {} grid [{},{}]", mapName, gx, gy)))
+            return false;
+    }
+    TimeLoadNs += NsSince(t0);
+
+    t0 = SteadyClock::now();
+    bool ok = ConvertADT(adt, mapName, outputPath, gx, gy, build, ignoreDeepWater);
+    TimeConvertNs += NsSince(t0);
+    return ok;
 }
 
 bool IsDeepWaterIgnored(uint32 mapId, uint32 x, uint32 y)
@@ -1144,9 +1170,9 @@ void ExtractMaps(uint32 build)
 
     // Phase 2 (parallel): one ADT conversion per task. Every task reads shared state that is immutable by now
     // (map_ids, Liquid* tables, CONF_*) and writes its own output file and its own existing[map][tile] byte.
-    // CASC: the storage handle is shared; CascLib's open/read is serialised here with castLock (only the file
-    // load, the decode/convert/write below runs unlocked) so thread safety does not depend on CascLib internals.
-    unsigned threads = CONF_threads ? CONF_threads : std::max(1u, std::thread::hardware_concurrency());
+    // CASC: every worker opens its own storage handle (see the worker), so no lock is needed for the ADT reads.
+    // Default worker count is capped at 8 because each storage holds its own index/encoding tables; -t N overrides.
+    unsigned threads = CONF_threads ? CONF_threads : std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
     threads = std::max(1u, std::min<unsigned>(threads, unsigned(std::max<std::size_t>(tasks.size(), 1))));
     printf("Converting " SZFMTD " ADT tiles of " SZFMTD " maps on %u threads\n", tasks.size(), map_ids.size(), threads);
 
@@ -1157,11 +1183,27 @@ void ExtractMaps(uint32 build)
     for (unsigned t = 0; t < threads; ++t)
         pool.emplace_back([&]
         {
+            // one CASC storage per worker, opened lazily on the first task (CascLib handles are independent; each costs
+            // the index/encoding/root parse and its memory). If the open fails the worker shares the main storage under CascLock.
+            std::shared_ptr<CASC::Storage> storage;
+            bool shared = false;
             for (;;)
             {
                 std::size_t i = next.fetch_add(1);
                 if (i >= tasks.size())
                     return;
+
+                if (!storage)
+                {
+                    auto t0 = SteadyClock::now();
+                    storage.reset(OpenCascStorageHandle(CascLocaleOpened));
+                    TimeOpenNs += NsSince(t0);
+                    if (!storage)
+                    {
+                        storage = CascStorage;
+                        shared = true;
+                    }
+                }
 
                 Task const& task = tasks[i];
                 MapEntry const& map = map_ids[task.mapIndex];
@@ -1169,11 +1211,11 @@ void ExtractMaps(uint32 build)
                 bool ignoreDeepWater = IsDeepWaterIgnored(map.Id, task.y, task.x);
                 bool ok;
                 if (task.byId)
-                    ok = ConvertADT(uint32(task.rootAdtFileDataId), map.Name, outputFileName, task.y, task.x, build, ignoreDeepWater);
+                    ok = ConvertADT(storage, shared, uint32(task.rootAdtFileDataId), map.Name, outputFileName, task.y, task.x, build, ignoreDeepWater);
                 else
                 {
                     std::string storagePath = Trinity::StringFormat(R"(World\Maps\{}\{}_{}_{}.adt)", map.Directory, map.Directory, task.x, task.y);
-                    ok = ConvertADT(storagePath, map.Name, outputFileName, task.y, task.x, build, ignoreDeepWater);
+                    ok = ConvertADT(storage, shared, storagePath, map.Name, outputFileName, task.y, task.x, build, ignoreDeepWater);
                 }
                 existing[task.mapIndex][task.y * WDT_MAP_SIZE + task.x] = ok;
 
@@ -1188,6 +1230,8 @@ void ExtractMaps(uint32 build)
         });
     for (std::thread& t : pool)
         t.join();
+    printf("ADT time summed over workers: storage open %.1f s, CASC load %.1f s, convert+write %.1f s\n",
+        TimeOpenNs.load() / 1e9, TimeLoadNs.load() / 1e9, TimeConvertNs.load() / 1e9);
 
     // Phase 3 (serial): the tile lists, one per map, in the original format
     for (std::size_t z = 0; z < map_ids.size(); ++z)
@@ -1450,35 +1494,38 @@ void ExtractGameTables()
     printf("Extracted %u files\n\n", count);
 }
 
-bool OpenCascStorage(int locale)
+// opens a new storage handle for the locale (nullptr on failure); safe to call from several threads
+CASC::Storage* OpenCascStorageHandle(int locale)
 {
     try
     {
         if (CONF_UseRemoteCasc)
         {
             boost::filesystem::path const cache_dir(boost::filesystem::canonical(input_path) / "CascCache");
-            CascStorage.reset(CASC::Storage::OpenRemote(cache_dir, WowLocaleToCascLocaleFlags[locale], CONF_Product, CONF_Region));
-            if (CascStorage)
-                return true;
+            if (CASC::Storage* remote = CASC::Storage::OpenRemote(cache_dir, WowLocaleToCascLocaleFlags[locale], CONF_Product, CONF_Region))
+                return remote;
 
             printf("Unable to open remote casc fallback to local casc\n");
         }
 
         boost::filesystem::path const storage_dir(boost::filesystem::canonical(input_path) / "Data");
-        CascStorage.reset(CASC::Storage::Open(storage_dir, WowLocaleToCascLocaleFlags[locale], CONF_Product));
-        if (!CascStorage)
-        {
+        CASC::Storage* storage = CASC::Storage::Open(storage_dir, WowLocaleToCascLocaleFlags[locale], CONF_Product);
+        if (!storage)
             printf("error opening casc storage '%s' locale %s\n", storage_dir.string().c_str(), localeNames[locale]);
-            return false;
-        }
-
-        return true;
+        return storage;
     }
     catch (std::exception const& error)
     {
         printf("Error opening CASC storage: %s\n", error.what());
-        return false;
+        return nullptr;
     }
+}
+
+bool OpenCascStorage(int locale)
+{
+    CascStorage.reset(OpenCascStorageHandle(locale));
+    CascLocaleOpened = locale;
+    return CascStorage != nullptr;
 }
 
 uint32 GetInstalledLocalesMask()
