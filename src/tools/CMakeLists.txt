@@ -10,6 +10,7 @@
 
 add_subdirectory(extractor_common)
 add_subdirectory(map_extractor)
+add_subdirectory(map_extractor_fast)
 add_subdirectory(vmap4_assembler)
 add_subdirectory(vmap4_extractor)
 add_subdirectory(mmaps_generator)
