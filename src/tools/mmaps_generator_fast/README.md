@@ -25,5 +25,7 @@ really doc G2.
   the map it is building, dropped when the worker moves to another map. The manager only holds weak references
   to loaded models, so `loadVMap` pins each tile's `WorldModel` shared_ptr in a per-worker cache (bounded at 4096
   distinct models, then cleared) and the next tile finds the parsed model. Per-tile `unloadMap(map,x,y)` is unchanged.
-- G5 `TerrainBuilder::loadMap`: cache the decoded neighbour `.map` height/liquid blocks per worker
-  (or read each file once) instead of ~5 decodes per tile.
+- G5 (done) `TerrainBuilder::loadMap`: the .map read + decode is split from the mesh assembly; decoded tiles
+  (V9/V8 heights, holes, liquid header/flags/heights) live in an immutable, process-wide LRU (1024 entries, key
+  input dir|skipLiquid|map|x|y, mutex-guarded, decode outside the lock). Shared rather than per worker because
+  neighbouring tiles go to different workers. Missing/invalid files are not cached. Assembly order is unchanged.

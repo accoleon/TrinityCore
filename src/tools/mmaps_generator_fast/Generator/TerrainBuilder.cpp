@@ -25,6 +25,8 @@
 #include "StringFormat.h"
 #include "Util.h"
 #include "VMapManager.h"
+#include <list>
+#include <mutex>
 #include <unordered_map>
 
 namespace MMAP
@@ -83,7 +85,87 @@ namespace MMAP
     }
 
     /**************************************************************************/
-    bool TerrainBuilder::loadMap(uint32 mapID, uint32 tileX, uint32 tileY, MeshData& meshData, VMAP::VMapManager* vmapManager, Spot portion)
+    /// Everything loadMap needs from one .map file, decoded exactly as the per-call code used to
+    struct DecodedMapTile
+    {
+        bool haveTerrain = false;
+        bool haveLiquid = false;
+        uint32 holesSize = 0;
+        uint8 holes[16][16][8] = { };
+        map_liquidHeaderTypeFlags liquidFlags[16][16] = { };
+        std::vector<float> V9;                  // V9_SIZE_SQ values, terrain only
+        std::vector<float> V8;                  // V8_SIZE_SQ values, terrain only
+        map_liquidHeader lheader = { };
+        std::unique_ptr<float[]> liquidMap;     // lheader.width * lheader.height values, null without liquid heights
+    };
+
+    namespace
+    {
+        // Decoded .map files shared by all worker threads, least recently used out beyond kCapacity. Neighbouring tiles
+        // are handed to different workers at about the same time, so a per-worker cache would almost never hit.
+        // Entries are immutable once published; a miss decodes outside the lock (two threads may decode the same
+        // file once, the first insert wins) and holders keep an evicted entry alive through their shared_ptr.
+        class DecodedMapTileCache
+        {
+        public:
+            static constexpr std::size_t kCapacity = 1024; // ~200 KB each at most
+
+            std::shared_ptr<DecodedMapTile const> Find(std::string const& key)
+            {
+                std::scoped_lock lock(_mutex);
+                auto itr = _index.find(key);
+                if (itr == _index.end())
+                    return nullptr;
+                _lru.splice(_lru.begin(), _lru, itr->second);
+                return itr->second->second;
+            }
+
+            std::shared_ptr<DecodedMapTile const> Insert(std::string const& key, std::shared_ptr<DecodedMapTile const> tile)
+            {
+                std::scoped_lock lock(_mutex);
+                auto itr = _index.find(key);
+                if (itr != _index.end())
+                {
+                    _lru.splice(_lru.begin(), _lru, itr->second);
+                    return itr->second->second;
+                }
+                _lru.emplace_front(key, std::move(tile));
+                _index.emplace(key, _lru.begin());
+                while (_lru.size() > kCapacity)
+                {
+                    _index.erase(_lru.back().first);
+                    _lru.pop_back();
+                }
+                return _lru.front().second;
+            }
+
+        private:
+            using Entry = std::pair<std::string, std::shared_ptr<DecodedMapTile const>>;
+            std::mutex _mutex;
+            std::list<Entry> _lru;
+            std::unordered_map<std::string, std::list<Entry>::iterator> _index;
+        };
+
+        DecodedMapTileCache sDecodedMapTiles;
+    }
+
+    /**************************************************************************/
+    std::shared_ptr<DecodedMapTile const> TerrainBuilder::getDecodedMapTile(uint32 mapID, uint32 tileX, uint32 tileY, VMAP::VMapManager* vmapManager) const
+    {
+        // the file read depends on the input directory and liquid setting as well; both are fixed per process, but keep them in the key
+        std::string key = Trinity::StringFormat("{}|{}|{}|{}|{}", m_inputDirectory.generic_string(), int(m_skipLiquid), mapID, tileX, tileY);
+        if (std::shared_ptr<DecodedMapTile const> cached = sDecodedMapTiles.Find(key))
+            return cached;
+
+        std::shared_ptr<DecodedMapTile const> decoded = decodeMapTile(mapID, tileX, tileY, vmapManager);
+        if (!decoded)
+            return nullptr; // missing/invalid file: not cached, the diagnostics repeat as before
+
+        return sDecodedMapTiles.Insert(key, std::move(decoded));
+    }
+
+    /**************************************************************************/
+    std::shared_ptr<DecodedMapTile const> TerrainBuilder::decodeMapTile(uint32 mapID, uint32 tileX, uint32 tileY, VMAP::VMapManager* vmapManager) const
     {
         std::string mapFileName = Trinity::StringFormat("{}/maps/{:04}_{:02}_{:02}.map", m_inputDirectory.generic_string(), mapID, tileX, tileY);
 
@@ -100,14 +182,14 @@ namespace MMAP
         }
 
         if (!mapFile)
-            return false;
+            return nullptr;
 
         map_fileheader fheader;
         if (fread(&fheader, sizeof(map_fileheader), 1, mapFile.get()) != 1 ||
             fheader.versionMagic != MapVersionMagic)
         {
             TC_LOG_ERROR("maps.mmapgen", "{} is the wrong version, please extract new .map files", mapFileName);
-            return false;
+            return nullptr;
         }
 
         map_heightHeader hheader;
@@ -123,20 +205,21 @@ namespace MMAP
 
         // no data in this map file
         if (!haveTerrain && !haveLiquid)
-            return false;
+            return nullptr;
 
-        // data used later
-        uint8 holes[16][16][8] = { };
-        uint16 liquid_entry[16][16] = { };
-        map_liquidHeaderTypeFlags liquid_flags[16][16] = { };
-        std::vector<int> ltriangles;
-        std::vector<int> ttriangles;
+        std::shared_ptr<DecodedMapTile> tile = std::make_shared<DecodedMapTile>();
+        tile->haveTerrain = haveTerrain;
+        tile->haveLiquid = haveLiquid;
+        tile->holesSize = fheader.holesSize;
 
         // terrain data
         if (haveTerrain)
         {
             float heightMultiplier;
-            float V9[V9_SIZE_SQ], V8[V8_SIZE_SQ];
+            tile->V9.resize(V9_SIZE_SQ);
+            tile->V8.resize(V8_SIZE_SQ);
+            float* V9 = tile->V9.data();
+            float* V8 = tile->V8.data();
             size_t expected = V9_SIZE_SQ + V8_SIZE_SQ;
 
             if (hheader.flags.HasFlag(map_heightHeaderFlags::HeightAsInt8))
@@ -187,11 +270,69 @@ namespace MMAP
             // hole data
             if (fheader.holesSize != 0)
             {
-                memset(holes, 0, fheader.holesSize);
+                memset(tile->holes, 0, fheader.holesSize);
                 fseek(mapFile.get(), fheader.holesOffset, SEEK_SET);
-                if (fread(holes, fheader.holesSize, 1, mapFile.get()) != 1)
+                if (fread(tile->holes, fheader.holesSize, 1, mapFile.get()) != 1)
                     TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} holes data expected {}, read {}", mapFileName, 1, 0);
             }
+        }
+
+        // liquid data
+        if (haveLiquid)
+        {
+            map_liquidHeader& lheader = tile->lheader;
+            uint16 liquid_entry[16][16] = { };
+            fseek(mapFile.get(), fheader.liquidMapOffset, SEEK_SET);
+            if (fread(&lheader, sizeof(map_liquidHeader), 1, mapFile.get()) != 1)
+                TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid header expected {}, read {}", mapFileName, 1, 0);
+
+            if (!lheader.flags.HasFlag(map_liquidHeaderFlags::NoType))
+            {
+                if (fread(liquid_entry, sizeof(liquid_entry), 1, mapFile.get()) != 1)
+                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid id expected {}, read {}", mapFileName, 1, 0);
+                if (fread(tile->liquidFlags, sizeof(tile->liquidFlags), 1, mapFile.get()) != 1)
+                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid flags expected {}, read {}", mapFileName, 1, 0);
+            }
+            else
+            {
+                std::fill_n(&liquid_entry[0][0], 16 * 16, lheader.liquidType);
+                std::fill_n(&tile->liquidFlags[0][0], 16 * 16, lheader.liquidFlags);
+            }
+
+            if (!lheader.flags.HasFlag(map_liquidHeaderFlags::NoHeight))
+            {
+                uint32 toRead = lheader.width * lheader.height;
+                tile->liquidMap = std::make_unique<float[]>(toRead);
+                if (fread(tile->liquidMap.get(), sizeof(float), toRead, mapFile.get()) != toRead)
+                {
+                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid header expected {}, read {}", mapFileName, toRead, 0);
+                    tile->liquidMap = nullptr;
+                }
+            }
+        }
+
+        return tile;
+    }
+
+    /**************************************************************************/
+    bool TerrainBuilder::loadMap(uint32 mapID, uint32 tileX, uint32 tileY, MeshData& meshData, VMAP::VMapManager* vmapManager, Spot portion)
+    {
+        std::shared_ptr<DecodedMapTile const> const tile = getDecodedMapTile(mapID, tileX, tileY, vmapManager);
+        if (!tile)
+            return false;
+
+        bool const haveTerrain = tile->haveTerrain;
+        bool const haveLiquid = tile->haveLiquid;
+        uint8 const (&holes)[16][16][8] = tile->holes;
+        map_liquidHeaderTypeFlags const (&liquid_flags)[16][16] = tile->liquidFlags;
+        std::vector<int> ltriangles;
+        std::vector<int> ttriangles;
+
+        // terrain data
+        if (haveTerrain)
+        {
+            float const* V9 = tile->V9.data();
+            float const* V8 = tile->V8.data();
 
             int count = meshData.solidVerts.size() / 3;
             meshData.solidVerts.resize(meshData.solidVerts.size() + (V9_SIZE_SQ + V8_SIZE_SQ) * 3);
@@ -228,36 +369,8 @@ namespace MMAP
         // liquid data
         if (haveLiquid)
         {
-            map_liquidHeader lheader;
-            fseek(mapFile.get(), fheader.liquidMapOffset, SEEK_SET);
-            if (fread(&lheader, sizeof(map_liquidHeader), 1, mapFile.get()) != 1)
-                TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid header expected {}, read {}", mapFileName, 1, 0);
-
-            std::unique_ptr<float[]> liquid_map;
-
-            if (!lheader.flags.HasFlag(map_liquidHeaderFlags::NoType))
-            {
-                if (fread(liquid_entry, sizeof(liquid_entry), 1, mapFile.get()) != 1)
-                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid id expected {}, read {}", mapFileName, 1, 0);
-                if (fread(liquid_flags, sizeof(liquid_flags), 1, mapFile.get()) != 1)
-                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid flags expected {}, read {}", mapFileName, 1, 0);
-            }
-            else
-            {
-                std::fill_n(&liquid_entry[0][0], 16 * 16, lheader.liquidType);
-                std::fill_n(&liquid_flags[0][0], 16 * 16, lheader.liquidFlags);
-            }
-
-            if (!lheader.flags.HasFlag(map_liquidHeaderFlags::NoHeight))
-            {
-                uint32 toRead = lheader.width * lheader.height;
-                liquid_map = std::make_unique<float[]>(toRead);
-                if (fread(liquid_map.get(), sizeof(float), toRead, mapFile.get()) != toRead)
-                {
-                    TC_LOG_ERROR("maps.mmapgen", "TerrainBuilder::loadMap: Failed to read {} liquid header expected {}, read {}", mapFileName, toRead, 0);
-                    liquid_map = nullptr;
-                }
-            }
+            map_liquidHeader const& lheader = tile->lheader;
+            float const* liquid_map = tile->liquidMap.get();
 
             int count = meshData.liquidVerts.size() / 3;
             meshData.liquidVerts.resize(meshData.liquidVerts.size() + V9_SIZE_SQ * 3);
@@ -286,7 +399,7 @@ namespace MMAP
                         continue;
                     }
 
-                    getLiquidCoord(i, j, xoffset, yoffset, &liquidVerts[(count + i) * 3], liquid_map.get());
+                    getLiquidCoord(i, j, xoffset, yoffset, &liquidVerts[(count + i) * 3], liquid_map);
                     j++;
                 }
             }
@@ -407,7 +520,7 @@ namespace MMAP
                 }
 
                 // if there is a hole here, don't use the terrain
-                if (useTerrain && fheader.holesSize != 0)
+                if (useTerrain && tile->holesSize != 0)
                     useTerrain = !isHole(i, holes);
 
                 // we use only one terrain kind per quad - pick higher one
@@ -466,7 +579,7 @@ namespace MMAP
     }
 
     /**************************************************************************/
-    inline void TerrainBuilder::getHeightCoord(int index, Grid grid, float xOffset, float yOffset, float* coord, float* v)
+    inline void TerrainBuilder::getHeightCoord(int index, Grid grid, float xOffset, float yOffset, float* coord, float const* v)
     {
         // wow coords: x, y, height
         // coord is mirroed about the horizontal axes
@@ -533,7 +646,7 @@ namespace MMAP
     }
 
     /**************************************************************************/
-    inline void TerrainBuilder::getLiquidCoord(int index, int index2, float xOffset, float yOffset, float* coord, float* v)
+    inline void TerrainBuilder::getLiquidCoord(int index, int index2, float xOffset, float yOffset, float* coord, float const* v)
     {
         // wow coords: x, y, height
         // coord is mirroed about the horizontal axes
