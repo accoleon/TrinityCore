@@ -29,3 +29,8 @@ really doc G2.
   (V9/V8 heights, holes, liquid header/flags/heights) live in an immutable, process-wide LRU (1024 entries, key
   input dir|skipLiquid|map|x|y, mutex-guarded, decode outside the lock). Shared rather than per worker because
   neighbouring tiles go to different workers. Missing/invalid files are not cached. Assembly order is unchanged.
+- G10 (done) `Generator/RecastFilterFast.{h,cpp}`: `rcFilterLedgeSpansFast`, called instead of rcFilterLedgeSpans. Same
+  verdict per span, but the neighbour scan stops once the span is settled (minh < -walkableClimb or
+  asmax-asmin > walkableClimb, both monotone) and a column scan stops once top - nbot <= walkableHeight (spans
+  ascend, so no later span can pass the gap test). Upstream main has rewritten the function with different
+  semantics (>= walkableHeight, floor-difference early-outs), so it is not a drop-in reference.

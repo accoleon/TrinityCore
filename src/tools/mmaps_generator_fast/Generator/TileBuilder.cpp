@@ -19,6 +19,7 @@
 #include "IntermediateValues.h"
 #include "Log.h"
 #include "MMapDefines.h"
+#include "RecastFilterFast.h"
 #include "Memory.h"
 #include "StringFormat.h"
 #include "VMapManager.h"
@@ -353,7 +354,7 @@ namespace MMAP
                 rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), *tile.solid, config.walkableClimb);
 
                 rcFilterLowHangingWalkableObstacles(&m_rcContext, config.walkableClimb, *tile.solid);
-                rcFilterLedgeSpans(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid);
+                rcFilterLedgeSpansFast(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid);
                 rcFilterWalkableLowHeightSpans(&m_rcContext, tileCfg.walkableHeight, *tile.solid);
 
                 // add liquid triangles
