@@ -21,6 +21,9 @@
 #include "FlatSet.h"
 #include "Optional.h"
 #include "ProducerConsumerQueue.h"
+#include <condition_variable>
+#include <map>
+#include <mutex>
 #include "TerrainBuilder.h"
 #include "TileBuilder.h"
 #include <boost/filesystem/path.hpp>
@@ -144,6 +147,12 @@ namespace MMAP
 
             uint32 m_totalTiles;
             std::atomic<uint32> m_totalTilesProcessed;
+
+            // scheduling weight per map (buildMaps order), see discoverTiles
+            std::map<uint32, uint64> m_mapCost;
+            void NotifyQueueDrained();
+            std::mutex m_queueDrainedLock;
+            std::condition_variable m_queueDrained;
 
             std::vector<std::unique_ptr<TileBuilder>> m_tileBuilders;
             ProducerConsumerQueue<TileInfo> _queue;

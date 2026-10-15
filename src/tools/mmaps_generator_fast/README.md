@@ -41,3 +41,8 @@ really doc G2.
   rcBuildRegions/rcBuildContours/rcBuildDistanceField/rcErodeWalkableArea internal scratch (allocated inside Recast
   functions; reuse would need ~800 lines of copied code for a few KB-allocs per sub-tile) and the per-sub-tile
   contour set / polymesh / detail mesh (kept for the merge).
+- G8 (done) `MapBuilder::buildMaps` without a map id queues maps largest-first (cost = tiles + vmtile bytes / 2048 per
+  tile, from discoverTiles; stable by map id). Order only: .mmap is written by buildNavMesh() on the main thread
+  before the map's tiles are queued, tiles are independent. Tiles of one map stay contiguous (G4/G5 locality).
+- G6 (done) the 1 s `sleep_for` poll for an empty queue is a condition variable: the worker that pops the last
+  queued tile notifies; the destructors still join the in-flight tiles as before.
