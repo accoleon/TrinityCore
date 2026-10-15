@@ -22,6 +22,8 @@
 #include "WorldModel.h"
 #include <G3D/Vector3.h>
 #include <boost/filesystem/path.hpp>
+#include <memory>
+#include <unordered_map>
 
 namespace VMAP
 {
@@ -92,6 +94,13 @@ namespace MMAP
 
             bool usesLiquids() const { return !m_skipLiquid; }
 
+            /// Pinning is off by default: only a caller that keeps its VMapManager alive for as long as the pins (TileBuilder's
+            /// per-worker manager) may enable it. Disabling drops the pins.
+            void setModelPinning(bool enable) { m_pinModels = enable; if (!enable) m_modelCache.clear(); }
+
+            /// Drops the models pinned by loadVMap (see m_modelCache); call before the VMapManager they came from goes away
+            void clearModelCache() { m_modelCache.clear(); }
+
             // vert and triangle methods
             static void transformVertices(std::vector<G3D::Vector3> const& source, std::vector<float>& dest,
                 float scale, G3D::Matrix3 const& rotation, G3D::Vector3 const& position);
@@ -109,6 +118,12 @@ namespace MMAP
 
             /// Controls whether liquids are loaded
             bool m_skipLiquid;
+
+            /// Keeps every WorldModel used by a loaded tile alive after the tile is unloaded, so the VMapManager
+            /// (which only holds weak references in iLoadedModelFiles) finds it again for the next tile instead of
+            /// re-reading the .vmo. Belongs to one worker thread, like the manager it was acquired from.
+            std::unordered_map<VMAP::WorldModel const*, std::shared_ptr<VMAP::WorldModel>> m_modelCache;
+            bool m_pinModels = false;
 
             /// Get the vector coordinate for a specific position
             static void getHeightCoord(int index, Grid grid, float xOffset, float yOffset, float* coord, float* v);

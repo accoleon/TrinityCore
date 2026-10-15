@@ -97,13 +97,22 @@ namespace MMAP
 
         MeshData meshData;
 
-        std::unique_ptr<VMAP::VMapManager> vmapManager = CreateVMapManager(mapID);
+        // reuse this worker's manager while it keeps building the same map; on a map change drop the pinned models
+        // first (they release themselves into their manager), then the manager
+        if (!m_vmapManager || m_vmapManagerMapId != mapID)
+        {
+            m_terrainBuilder.clearModelCache();
+            m_terrainBuilder.setModelPinning(true);
+            m_vmapManager = CreateVMapManager(mapID);
+            m_vmapManagerMapId = mapID;
+        }
+        VMAP::VMapManager* vmapManager = m_vmapManager.get();
 
         // get heightmap data
-        m_terrainBuilder.loadMap(mapID, tileX, tileY, meshData, vmapManager.get());
+        m_terrainBuilder.loadMap(mapID, tileX, tileY, meshData, vmapManager);
 
         // get model data
-        m_terrainBuilder.loadVMap(mapID, tileX, tileY, meshData, vmapManager.get());
+        m_terrainBuilder.loadVMap(mapID, tileX, tileY, meshData, vmapManager);
 
         // if there is no data, give up now
         if (meshData.solidVerts.empty() && meshData.liquidVerts.empty())

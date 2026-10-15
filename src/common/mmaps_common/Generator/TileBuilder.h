@@ -25,6 +25,11 @@
 #include <DetourNavMesh.h>
 #include <Recast.h>
 
+namespace VMAP
+{
+class VMapManager;
+}
+
 namespace MMAP
 {
 struct TileConfig;
@@ -89,6 +94,12 @@ protected:
     Optional<float> m_maxWalkableAngleNotSteep;
     bool m_bigBaseUnit;
     bool m_debugOutput;
+
+    // One VMapManager per builder (= per worker thread, never shared) for the map it is currently building, so loaded
+    // .vmo models stay cached across tiles. Declared before m_terrainBuilder: the terrain builder pins models acquired
+    // from this manager and must be destroyed (releasing them) first.
+    std::unique_ptr<VMAP::VMapManager> m_vmapManager;
+    uint32 m_vmapManagerMapId = 0;
 
     TerrainBuilder m_terrainBuilder;
     // build performance - not really used for now
