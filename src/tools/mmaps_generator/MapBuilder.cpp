@@ -26,6 +26,8 @@
 #include "StringConvert.h"
 #include "StringFormat.h"
 #include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <algorithm>
 
 namespace FileExtensions
 {
@@ -136,7 +138,10 @@ namespace MMAP
                         for (uint32 tileY = 0; tileY < 64; ++tileY)
                             if (tilesData[std::size(tilesData) - 1 - (tileX * 64 + tileY)] == '1')
                                 if (tiles.insert(VMAP::StaticMapTree::packTileID(tileX, tileY)).second)
+                                {
                                     ++m_totalTiles;
+                                    ++m_mapCost[*mapId];
+                                }
                 }
             }
         }
@@ -169,7 +174,17 @@ namespace MMAP
                 uint32 tileID = VMAP::StaticMapTree::packTileID(tileX, tileY);
 
                 if (tiles.insert(tileID).second)
+                {
                     ++m_totalTiles;
+                    ++m_mapCost[*mapId];
+                }
+
+                // Scheduling heuristic only (buildMaps order): a dense WMO tile (~60 KB .vmtile) takes ~30x as long
+                // as a plain terrain tile (~14 KB average), so weight each tile by 1 + vmtile bytes / 2048.
+                boost::system::error_code sizeError;
+                uintmax_t const vmtileBytes = boost::filesystem::file_size(fileItr->path(), sizeError);
+                if (!sizeError)
+                    m_mapCost[*mapId] += vmtileBytes / 2048;
             }
         }
 
@@ -231,6 +246,10 @@ namespace MMAP
 
             m_mapBuilder->_queue.WaitAndPop(tileInfo);
 
+            // the last queued tile has been taken: wake buildMaps, which then only joins the workers
+            if (m_mapBuilder->_queue.Empty())
+                m_mapBuilder->NotifyQueueDrained();
+
             if (m_mapBuilder->_cancelationToken)
                 return;
 
@@ -246,6 +265,13 @@ namespace MMAP
 
             dtFreeNavMesh(navMesh);
         }
+    }
+
+    void MapBuilder::NotifyQueueDrained()
+    {
+        // take the lock so the notification cannot slip between buildMaps' predicate check and its wait
+        std::lock_guard<std::mutex> lock(m_queueDrainedLock);
+        m_queueDrained.notify_all();
     }
 
     void MapBuilder::buildMaps(Optional<uint32> mapID)
@@ -264,13 +290,25 @@ namespace MMAP
         else
         {
             // Build all maps if no map id has been specified
+            // Largest maps first so the longest-running work starts early and the tail is made of small maps.
+            // Order only: every tile is independent, and each map's .mmap is written by buildNavMesh() on this thread
+            // before that map's tiles are queued, from the map's (or its parent's) tile set alone. Ties by map id.
+            std::vector<std::pair<uint64, uint32>> order;
+            order.reserve(m_tiles.size());
             for (auto& [mapId, _] : m_tiles)
+            {
+                auto cost = m_mapCost.find(mapId);
+                order.emplace_back(cost != m_mapCost.end() ? cost->second : 0, mapId);
+            }
+            std::stable_sort(order.begin(), order.end(), [](auto const& a, auto const& b) { return a.first > b.first; });
+
+            for (auto const& [_, mapId] : order)
                 buildMap(mapId);
         }
 
-        while (!_queue.Empty())
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            std::unique_lock<std::mutex> lock(m_queueDrainedLock);
+            m_queueDrained.wait(lock, [this] { return _queue.Empty(); });
         }
 
         _cancelationToken = true;
