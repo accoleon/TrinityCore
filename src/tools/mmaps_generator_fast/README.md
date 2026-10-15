@@ -34,3 +34,10 @@ really doc G2.
   asmax-asmin > walkableClimb, both monotone) and a column scan stops once top - nbot <= walkableHeight (spans
   ascend, so no later span can pass the gap test). Upstream main has rewritten the function with different
   semantics (>= walkableHeight, floor-difference early-outs), so it is not a drop-in reference.
+- F6 (done) `Generator/RecastReuse.{h,cpp}`: one `SubTileScratch` (heightfield + compact heightfield) per ADT tile
+  instead of 625 alloc/free pairs. `rcResetHeightfield` = rcCreateHeightfield on a kept spans array + kept span pools
+  (free list re-threaded); `rcBuildCompactHeightfieldReuse` = verbatim copy of rcBuildCompactHeightfield with the cells/
+  spans/areas allocations reused (capacity-checked, same memsets, header fields and `dist` reset). Skipped: the
+  rcBuildRegions/rcBuildContours/rcBuildDistanceField/rcErodeWalkableArea internal scratch (allocated inside Recast
+  functions; reuse would need ~800 lines of copied code for a few KB-allocs per sub-tile) and the per-sub-tile
+  contour set / polymesh / detail mesh (kept for the merge).

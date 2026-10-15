@@ -20,6 +20,7 @@
 #include "Log.h"
 #include "MMapDefines.h"
 #include "RecastFilterFast.h"
+#include "RecastReuse.h"
 #include "Memory.h"
 #include "StringFormat.h"
 #include "VMapManager.h"
@@ -292,6 +293,11 @@ namespace MMAP
             }
         };
 
+        // heightfield and compact heightfield buffers shared by all sub-tiles of this ADT tile
+        SubTileScratch scratch;
+        rcHeightfield& solid = scratch.solid;
+        rcCompactHeightfield& chf = scratch.chf;
+
         // build all tiles
         for (int y = 0; y < TILES_PER_MAP; ++y)
         {
@@ -343,59 +349,57 @@ namespace MMAP
                 }
 
                 // build heightfield
-                tile.solid = rcAllocHeightfield();
-                if (!tile.solid || !rcCreateHeightfield(&m_rcContext, *tile.solid, tileCfg.width, tileCfg.height, tileCfg.bmin, tileCfg.bmax, tileCfg.cs, tileCfg.ch))
+                if (!rcResetHeightfield(solid, tileCfg.width, tileCfg.height, tileCfg.bmin, tileCfg.bmax, tileCfg.cs, tileCfg.ch))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed building heightfield!", tileString);
                     continue;
                 }
 
                 gatherBin(solidBins[x + y * TILES_PER_MAP], tTris, triFlags.get());
-                rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), *tile.solid, config.walkableClimb);
+                rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
 
-                rcFilterLowHangingWalkableObstacles(&m_rcContext, config.walkableClimb, *tile.solid);
-                rcFilterLedgeSpansFast(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid);
-                rcFilterWalkableLowHeightSpans(&m_rcContext, tileCfg.walkableHeight, *tile.solid);
+                rcFilterLowHangingWalkableObstacles(&m_rcContext, config.walkableClimb, solid);
+                rcFilterLedgeSpansFast(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, solid);
+                rcFilterWalkableLowHeightSpans(&m_rcContext, tileCfg.walkableHeight, solid);
 
                 // add liquid triangles
                 gatherBin(liquidBins[x + y * TILES_PER_MAP], lTris, lTriFlags);
-                rcRasterizeTriangles(&m_rcContext, lVerts, lVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), *tile.solid, config.walkableClimb);
+                rcRasterizeTriangles(&m_rcContext, lVerts, lVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
 
                 // compact heightfield spans
-                tile.chf = rcAllocCompactHeightfield();
-                if (!tile.chf || !rcBuildCompactHeightfield(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, *tile.solid, *tile.chf))
+                if (!rcBuildCompactHeightfieldReuse(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, solid, scratch))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed compacting heightfield!", tileString);
                     continue;
                 }
 
                 // build polymesh intermediates
-                if (!rcErodeWalkableArea(&m_rcContext, config.walkableRadius, *tile.chf))
+                if (!rcErodeWalkableArea(&m_rcContext, config.walkableRadius, chf))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed eroding area!", tileString);
                     continue;
                 }
 
-                if (!rcMedianFilterWalkableArea(&m_rcContext, *tile.chf))
+                if (!rcMedianFilterWalkableArea(&m_rcContext, chf))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed filtering area!", tileString);
                     continue;
                 }
 
-                if (!rcBuildDistanceField(&m_rcContext, *tile.chf))
+                if (!rcBuildDistanceField(&m_rcContext, chf))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed building distance field!", tileString);
                     continue;
                 }
 
-                if (!rcBuildRegions(&m_rcContext, *tile.chf, tileCfg.borderSize, tileCfg.minRegionArea, tileCfg.mergeRegionArea))
+                if (!rcBuildRegions(&m_rcContext, chf, tileCfg.borderSize, tileCfg.minRegionArea, tileCfg.mergeRegionArea))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed building regions!", tileString);
                     continue;
                 }
 
                 tile.cset = rcAllocContourSet();
-                if (!tile.cset || !rcBuildContours(&m_rcContext, *tile.chf, tileCfg.maxSimplificationError, tileCfg.maxEdgeLen, *tile.cset))
+                if (!tile.cset || !rcBuildContours(&m_rcContext, chf, tileCfg.maxSimplificationError, tileCfg.maxEdgeLen, *tile.cset))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed building contours!", tileString);
                     continue;
@@ -410,7 +414,7 @@ namespace MMAP
                 }
 
                 tile.dmesh = rcAllocPolyMeshDetail();
-                if (!tile.dmesh || !rcBuildPolyMeshDetail(&m_rcContext, *tile.pmesh, *tile.chf, tileCfg.detailSampleDist, tileCfg.detailSampleMaxError, *tile.dmesh))
+                if (!tile.dmesh || !rcBuildPolyMeshDetail(&m_rcContext, *tile.pmesh, chf, tileCfg.detailSampleDist, tileCfg.detailSampleMaxError, *tile.dmesh))
                 {
                     TC_LOG_ERROR("maps.mmapgen", "{} Failed building polymesh detail!", tileString);
                     continue;
@@ -419,10 +423,7 @@ namespace MMAP
                 // free those up
                 // we may want to keep them in the future for debug
                 // but right now, we don't have the code to merge them
-                rcFreeHeightField(tile.solid);
-                tile.solid = nullptr;
-                rcFreeCompactHeightfield(tile.chf);
-                tile.chf = nullptr;
+                // (heightfield and compact heightfield are kept in `scratch` for the next sub-tile)
                 rcFreeContourSet(tile.cset);
                 tile.cset = nullptr;
 
