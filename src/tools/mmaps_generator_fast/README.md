@@ -16,7 +16,11 @@ really doc G2.
   the 25x25 sub-tile loop, and reuse them.
 - G2 same function: bin solid and liquid triangles into per-sub-tile index lists once (bbox vs the
   sub-tile bounds incl. border) and rasterize only that list; keep triangle order within a sub-tile.
-- G3 same loop: skip a sub-tile entirely when its binned lists are empty / its heightfield has no spans.
+- G3 same loop (done): a sub-tile whose binned solid and liquid lists are both empty skips the Recast pipeline
+  and pushes a header-only polymesh stub (bmin/bmax/cs/ch/nvp as rcBuildContours/PolyMesh derive them) so the
+  merged bounds, and therefore every other sub-tile's offsets and border flags, are unchanged; its detail
+  mesh entry is nullptr (rcMergePolyMeshDetails skips those). Sub-tiles with triangles that yield no spans
+  still run the full pipeline.
 - G4 `PathGenerator.cpp:CreateVMapManager` + `TileBuilder::buildTile`: one `VMapManager` per worker
   per map so `.vmo` parses are cached across tiles (needs a keep-loaded flag for the model refcount).
 - G5 `TerrainBuilder::loadMap`: cache the decoded neighbour `.map` height/liquid blocks per worker
