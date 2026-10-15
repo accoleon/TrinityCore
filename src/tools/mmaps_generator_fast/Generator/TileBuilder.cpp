@@ -203,7 +203,6 @@ namespace MMAP
         int tTriCount = meshData.solidTris.size() / 3;
 
         float* lVerts = meshData.liquidVerts.data();
-        int lVertCount = meshData.liquidVerts.size() / 3;
         int* lTris = meshData.liquidTris.data();
         int lTriCount = meshData.liquidTris.size() / 3;
         uint8* lTriFlags = meshData.liquidType.data();
