@@ -1893,6 +1893,9 @@ struct areatrigger_pri_entropic_rift : public AreaTriggerAI
 
         PathGenerator path(at);
         path.CalculatePath(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(), false);
+        if (path.GetPathType() & PATHFIND_NOPATH || path.GetPath().size() < 2)
+            return;
+
         at->InitSplines(path.GetPath(), _movementSpeed);
     }
 
