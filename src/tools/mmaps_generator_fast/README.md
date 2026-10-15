@@ -46,3 +46,11 @@ really doc G2.
   before the map's tiles are queued, tiles are independent. Tiles of one map stay contiguous (G4/G5 locality).
 - G6 (done) the 1 s `sleep_for` poll for an empty queue is a condition variable: the worker that pops the last
   queued tile notifies; the destructors still join the in-flight tiles as before.
+- G11 (done, fallback variant) `Generator/RecastRasterFast.{h,cpp}`: `rcRasterizeTrianglesFast` replaces rcRasterizeTriangles. The
+  shared-ADT-heightfield idea was NOT done: (a) the sub-tile cell edges are `(bmin0 + i*T) - border*cs + x*cs` in float, not
+  `bmin0 + (i*T - border + x)*cs`, so edges can differ by an ulp; (b) rasterizeTri clamps the row/column range, so
+  the polygon part lying outside the heightfield is folded into the edge cells (their span y-range includes outside
+  geometry), which a larger heightfield would clip exactly instead. Overlap factor: (80+2*5)^2/80^2 = 1.266 (90x90 cells
+  incl. border vs 80x80), so even a perfect share saves <= 21% of rasterization. The fast version copies
+  rasterizeTri/dividePoly/addSpan with identical float expressions, fixes the axis at compile time, and for the last row
+  / last column only builds the kept polygon (the remainder is never read afterwards).

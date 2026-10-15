@@ -20,6 +20,7 @@
 #include "Log.h"
 #include "MMapDefines.h"
 #include "RecastFilterFast.h"
+#include "RecastRasterFast.h"
 #include "RecastReuse.h"
 #include "Memory.h"
 #include "StringFormat.h"
@@ -356,7 +357,7 @@ namespace MMAP
                 }
 
                 gatherBin(solidBins[x + y * TILES_PER_MAP], tTris, triFlags.get());
-                rcRasterizeTriangles(&m_rcContext, tVerts, tVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
+                rcRasterizeTrianglesFast(&m_rcContext, tVerts, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
 
                 rcFilterLowHangingWalkableObstacles(&m_rcContext, config.walkableClimb, solid);
                 rcFilterLedgeSpansFast(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, solid);
@@ -364,7 +365,7 @@ namespace MMAP
 
                 // add liquid triangles
                 gatherBin(liquidBins[x + y * TILES_PER_MAP], lTris, lTriFlags);
-                rcRasterizeTriangles(&m_rcContext, lVerts, lVertCount, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
+                rcRasterizeTrianglesFast(&m_rcContext, lVerts, binTris.data(), binAreas.data(), int(binAreas.size()), solid, config.walkableClimb);
 
                 // compact heightfield spans
                 if (!rcBuildCompactHeightfieldReuse(&m_rcContext, tileCfg.walkableHeight, tileCfg.walkableClimb, solid, scratch))
