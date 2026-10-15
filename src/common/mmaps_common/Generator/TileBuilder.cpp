@@ -296,6 +296,43 @@ namespace MMAP
                 tileCfg.bmax[0] = subTileMaxX[x];
                 tileCfg.bmax[2] = subTileMaxZ[y];
 
+                // An empty sub-tile (no solid and no liquid triangle overlaps it) rasterizes nothing: the heightfield has
+                // no spans, so the original pipeline ends in a polymesh with nverts == npolys == 0 and an empty detail
+                // mesh. The only thing such a mesh contributes to rcMergePolyMeshes is its header (bmin/bmax feed the
+                // merged bounds and so every other sub-tile's ox/oz offset and the border flags; nvp/cs/ch come from
+                // meshes[0]); rcMergePolyMeshDetails adds nothing. So push a header-only stub with exactly the values
+                // rcBuildContours/rcBuildPolyMesh would have derived, and skip the rest.
+                if (solidBins[x + y * TILES_PER_MAP].empty() && liquidBins[x + y * TILES_PER_MAP].empty())
+                {
+                    tile.pmesh = rcAllocPolyMesh();
+                    if (tile.pmesh)
+                    {
+                        // chf.bmin/bmax = hf.bmin/bmax (bmax[1] += walkableHeight * ch); cset applies the border pad to x/z
+                        float const pad = tileCfg.borderSize * tileCfg.cs;
+                        tile.pmesh->bmin[0] = tileCfg.bmin[0];
+                        tile.pmesh->bmin[1] = tileCfg.bmin[1];
+                        tile.pmesh->bmin[2] = tileCfg.bmin[2];
+                        tile.pmesh->bmax[0] = tileCfg.bmax[0];
+                        tile.pmesh->bmax[1] = tileCfg.bmax[1];
+                        tile.pmesh->bmax[1] += tileCfg.walkableHeight * tileCfg.ch;
+                        tile.pmesh->bmax[2] = tileCfg.bmax[2];
+                        tile.pmesh->bmin[0] += pad;
+                        tile.pmesh->bmin[2] += pad;
+                        tile.pmesh->bmax[0] -= pad;
+                        tile.pmesh->bmax[2] -= pad;
+                        tile.pmesh->cs = tileCfg.cs;
+                        tile.pmesh->ch = tileCfg.ch;
+                        tile.pmesh->borderSize = tileCfg.borderSize;
+                        tile.pmesh->maxEdgeError = tileCfg.maxSimplificationError;
+                        tile.pmesh->nvp = tileCfg.maxVertsPerPoly;
+                        pmmerge[nmerge] = tile.pmesh;
+                        dmmerge[nmerge] = nullptr;
+                        nmerge++;
+                        continue;
+                    }
+                    // allocation failure: fall through to the full pipeline
+                }
+
                 // build heightfield
                 tile.solid = rcAllocHeightfield();
                 if (!tile.solid || !rcCreateHeightfield(&m_rcContext, *tile.solid, tileCfg.width, tileCfg.height, tileCfg.bmin, tileCfg.bmax, tileCfg.cs, tileCfg.ch))
