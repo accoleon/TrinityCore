@@ -26,6 +26,9 @@
 #include <boost/filesystem/path.hpp>
 #include <DetourNavMesh.h>
 #include <atomic>
+#include <condition_variable>
+#include <map>
+#include <mutex>
 #include <span>
 #include <thread>
 #include <vector>
@@ -144,6 +147,12 @@ namespace MMAP
 
             uint32 m_totalTiles;
             std::atomic<uint32> m_totalTilesProcessed;
+
+            // scheduling weight per map (buildMaps order), see discoverTiles
+            std::map<uint32, uint64> m_mapCost;
+            void NotifyQueueDrained();
+            std::mutex m_queueDrainedLock;
+            std::condition_variable m_queueDrained;
 
             std::vector<std::unique_ptr<TileBuilder>> m_tileBuilders;
             ProducerConsumerQueue<TileInfo> _queue;
