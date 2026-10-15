@@ -21,7 +21,9 @@ really doc G2.
   merged bounds, and therefore every other sub-tile's offsets and border flags, are unchanged; its detail
   mesh entry is nullptr (rcMergePolyMeshDetails skips those). Sub-tiles with triangles that yield no spans
   still run the full pipeline.
-- G4 `PathGenerator.cpp:CreateVMapManager` + `TileBuilder::buildTile`: one `VMapManager` per worker
-  per map so `.vmo` parses are cached across tiles (needs a keep-loaded flag for the model refcount).
+- G4 (done) `TileBuilder::buildTile` + `TerrainBuilder::loadVMap`: one `VMapManager` per worker (TileBuilder) for
+  the map it is building, dropped when the worker moves to another map. The manager only holds weak references
+  to loaded models, so `loadVMap` pins each tile's `WorldModel` shared_ptr in a per-worker cache (bounded at 4096
+  distinct models, then cleared) and the next tile finds the parsed model. Per-tile `unloadMap(map,x,y)` is unchanged.
 - G5 `TerrainBuilder::loadMap`: cache the decoded neighbour `.map` height/liquid blocks per worker
   (or read each file once) instead of ~5 decodes per tile.

@@ -567,6 +567,21 @@ namespace MMAP
     }
 
     /**************************************************************************/
+    namespace
+    {
+        constexpr std::size_t kMaxCachedModels = 4096;
+
+        // ModelInstance keeps its shared_ptr<WorldModel> protected and only exposes the raw pointer; reach it
+        // through a derived class' member pointer (standard protected-access idiom, no change to the library)
+        struct ModelInstanceModelAccess : VMAP::ModelInstance
+        {
+            static std::shared_ptr<VMAP::WorldModel> const& Get(VMAP::ModelInstance const& instance)
+            {
+                return instance.*(&ModelInstanceModelAccess::iModel);
+            }
+        };
+    }
+
     bool TerrainBuilder::loadVMap(uint32 mapID, uint32 tileX, uint32 tileY, MeshData& meshData, VMAP::VMapManager* vmapManager)
     {
         VMAP::LoadResult result = vmapManager->loadMap((m_inputDirectory / "vmaps").string(), mapID, tileX, tileY);
@@ -594,11 +609,20 @@ namespace MMAP
             // now we have a model to add to the meshdata
             retval = true;
 
+            // pin the model beyond this tile's unload (bounded, see kMaxCachedModels)
+            if (!m_modelCache.contains(worldModel))
+                m_modelCache.emplace(worldModel, ModelInstanceModelAccess::Get(instance));
+
             G3D::Vector3 position = instance.iPos;
             position.x -= 32 * GRID_SIZE;
             position.y -= 32 * GRID_SIZE;
             loadVMapModel(worldModel, position, instance.GetInvRot(), instance.iScale, meshData, vmapManager);
         }
+
+        // bound the memory a worker holds: forget everything once too many distinct models are pinned
+        // (models still used by a loaded tile stay alive through that tile's own references)
+        if (m_modelCache.size() > kMaxCachedModels)
+            m_modelCache.clear();
 
         return retval;
     }
