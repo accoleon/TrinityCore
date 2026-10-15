@@ -32,6 +32,8 @@ enum class map_liquidHeaderTypeFlags : uint8;
 
 namespace MMAP
 {
+    struct DecodedMapTile;
+
     enum Spot
     {
         TOP     = 1,
@@ -90,6 +92,10 @@ namespace MMAP
                 MeshData& meshData, VMAP::VMapManager* vmapManager);
             void loadOffMeshConnections(uint32 mapID, uint32 tileX, uint32 tileY, MeshData& meshData, std::vector<OffMeshData> const& offMeshConnections);
 
+            /// Process-wide, off by default: decode every .map once and share it between all TerrainBuilders (for the
+            /// multithreaded generator). Without it every loadMap call decodes its files as before.
+            static void EnableDecodedMapTileCache(bool enable);
+
             bool usesLiquids() const { return !m_skipLiquid; }
 
             // vert and triangle methods
@@ -102,6 +108,10 @@ namespace MMAP
             /// Loads a portion of a map's terrain
             bool loadMap(uint32 mapID, uint32 tileX, uint32 tileY, MeshData& meshData, VMAP::VMapManager* vmapManager, Spot portion);
 
+            /// The decoded contents of one .map file, from the process-wide cache or read from disk (null: no usable file)
+            std::shared_ptr<DecodedMapTile const> getDecodedMapTile(uint32 mapID, uint32 tileX, uint32 tileY, VMAP::VMapManager* vmapManager) const;
+            std::shared_ptr<DecodedMapTile const> decodeMapTile(uint32 mapID, uint32 tileX, uint32 tileY, VMAP::VMapManager* vmapManager) const;
+
             /// Sets loop variables for selecting only certain parts of a map's terrain
             static void getLoopVars(Spot portion, int& loopStart, int& loopEnd, int& loopInc);
 
@@ -111,7 +121,7 @@ namespace MMAP
             bool m_skipLiquid;
 
             /// Get the vector coordinate for a specific position
-            static void getHeightCoord(int index, Grid grid, float xOffset, float yOffset, float* coord, float* v);
+            static void getHeightCoord(int index, Grid grid, float xOffset, float yOffset, float* coord, float const* v);
 
             /// Get the triangle's vector indices for a specific position
             static void getHeightTriangle(int square, Spot triangle, int* indices, int offset, bool liquid = false);
@@ -120,7 +130,7 @@ namespace MMAP
             static bool isHole(int square, uint8 const (&holes)[16][16][8]);
 
             /// Get the liquid vector coordinate for a specific position
-            static void getLiquidCoord(int index, int index2, float xOffset, float yOffset, float* coord, float* v);
+            static void getLiquidCoord(int index, int index2, float xOffset, float yOffset, float* coord, float const* v);
 
             /// Get the liquid type for a specific position
             static map_liquidHeaderTypeFlags getLiquidType(int square, map_liquidHeaderTypeFlags const (&liquid_type)[16][16]);
