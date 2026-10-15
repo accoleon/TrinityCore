@@ -7,10 +7,10 @@ below land one per commit, each a candidate small upstream PR (numbering from
 `docs/history/mmaps-perf-535-2026-10-14.md` section 3 of the wowmidnight repo). Every commit is gated
 by `mmapbench compare` (byte-identical .mmtile/.mmap).
 
-Status: G1 done (commit "G1"), G3 done (commit "G3"); G2/G4/G5 not started. Note the numbering used by
-the item 535 brief: G3 = the per-sub-tile triangle binning described under "G2" below (solid and liquid
-lists, XZ bbox vs sub-tile bounds incl. border, original triangle order kept); no sub-tile is skipped, an
-empty bin just rasterizes nothing.
+Status: G1 done (commit "G1"), G2 done (commit labelled "G3": per-sub-tile triangle binning, solid and
+liquid lists, XZ bbox vs sub-tile bounds incl. border, original triangle order kept; empty bins still run
+the pipeline). G3/G4/G5 follow below. Numbering is the doc's; the commit subject "G3 bin triangles..." is
+really doc G2.
 
 - G1 `TileBuilder::buildMoveMapTile`: compute `triFlags` (and liquid flags) once per ADT tile, before
   the 25x25 sub-tile loop, and reuse them.
