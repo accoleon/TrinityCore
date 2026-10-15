@@ -54,3 +54,21 @@ really doc G2.
   incl. border vs 80x80), so even a perfect share saves <= 21% of rasterization. The fast version copies
   rasterizeTri/dividePoly/addSpan with identical float expressions, fixes the axis at compile time, and for the last row
   / last column only builds the kept polygon (the remainder is never read afterwards).
+- G9 (done) `Generator/Incremental.{h,cpp}`: `--write-inputs` writes `<out>/mmaps/.inputs.tsv` (one row per completed tile:
+  map, x, y, sha256 of the tile's inputs, `tile`|`none`); `--incremental <prev_dir>` implies it and, per tile, clones
+  `<prev_dir>/mmaps/<tile>.mmtile` (ioctl FICLONE reflink, plain copy fallback) when prev's row has the same digest, instead of
+  building (`none` rows: nothing to build, a stale output tile is removed). The resume-skip (any existing .mmtile) is off in these
+  modes. `--dump-inputs` prints each requested tile's digest and input list and builds/writes nothing (use with a map id and `--tile`).
+  A sidecar covers exactly the tiles of its run (a partial run overwrites it: use a scratch output dir for those).
+  Digest inputs: tool version constant + MMAP_VERSION-independent args (maxAngle, maxAngleNotSteep, skipLiquid, bigBaseUnit,
+  debugOutput) + the LiquidType SoundBank map; the navmesh params (orig, tile size, maxTiles/maxPolys: orig depends on the tile
+  set of the root parent map); the Map.db2 fields used (MapType, InstanceType, ParentMapID with the Cosmetic fallback, Flags1) along
+  the parent chain; the .map of the tile and of its 4 neighbours (own map, else first parent chain hit); the map's .vmtree object
+  count, the .vmtileidx, the .vmtile (own, else parent chain) as canonical spawns in tree-index order WITHOUT the unique id,
+  adtId and index values (vmap4extractor hands ids out in thread order, so raw .vmtile bytes differ between extractions), and the
+  sha256 of every .vmo the spawns name; the off-mesh connections of the tile. The per-map `.mmap` is always rewritten (cheap: a
+  header + the map's off-mesh records; its content depends on the map's whole tile set, so a digest would have to cover every
+  tile anyway).
+  Order dependence: loadVMap meshes the loaded ModelInstances in `iTreeValues` index order (the index = the spawn's BIH
+  position from the .vmtileidx), and Recast span merging (addSpan area merge) is order dependent in principle, so the digest keeps
+  that order and drops only the values that cannot reach the mesh.

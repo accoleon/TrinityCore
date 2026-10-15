@@ -17,6 +17,7 @@
 
 #include "TileBuilder.h"
 #include "IntermediateValues.h"
+#include "Incremental.h"
 #include "Log.h"
 #include "MMapDefines.h"
 #include "RecastFilterFast.h"
@@ -98,6 +99,27 @@ namespace MMAP
             return;
         }
 
+        // G9: settle the tile from a previous run when none of its inputs changed
+        MMAP::IncrementalState* incremental = MMAP::IncrementalState::Get();
+        std::string inputDigest;
+        if (incremental)
+        {
+            std::string dump;
+            inputDigest = incremental->ComputeTileDigest(mapID, tileX, tileY, *navMesh->getParams(), m_offMeshConnections,
+                MMAP::sIncrementalOptions.dumpInputs ? &dump : nullptr);
+            if (MMAP::sIncrementalOptions.dumpInputs)
+            {
+                printf("== map %u tile %u,%u digest %s\n%s", mapID, tileX, tileY, inputDigest.c_str(), dump.c_str());
+                OnTileDone();
+                return;
+            }
+            if (incremental->TryReuse(mapID, tileX, tileY, inputDigest))
+            {
+                OnTileDone();
+                return;
+            }
+        }
+
         TC_LOG_INFO("maps.mmapgen", "{} [Map {:04}] Building tile [{:02},{:02}]", GetProgressText(), mapID, tileX, tileY);
 
         MeshData meshData;
@@ -121,6 +143,8 @@ namespace MMAP
         // if there is no data, give up now
         if (meshData.solidVerts.empty() && meshData.liquidVerts.empty())
         {
+            if (incremental)
+                incremental->Record(mapID, tileX, tileY, inputDigest, false);
             OnTileDone();
             return;
         }
@@ -131,6 +155,8 @@ namespace MMAP
 
         if (meshData.liquidVerts.empty() && meshData.solidVerts.empty())
         {
+            if (incremental)
+                incremental->Record(mapID, tileX, tileY, inputDigest, false);
             OnTileDone();
             return;
         }
@@ -151,6 +177,9 @@ namespace MMAP
         TileResult tileResult = buildMoveMapTile(mapID, tileX, tileY, meshData, bmin, bmax, navMesh->getParams());
         if (tileResult.data)
             saveMoveMapTileToFile(mapID, tileX, tileY, navMesh, tileResult);
+
+        if (incremental)
+            incremental->Record(mapID, tileX, tileY, inputDigest, tileResult.data != nullptr);
 
         OnTileDone();
     }
