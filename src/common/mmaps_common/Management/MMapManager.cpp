@@ -23,6 +23,7 @@
 #include "MapUtils.h"
 #include "Memory.h"
 #include <algorithm>
+#include <mutex>
 
 namespace MMAP
 {
@@ -43,6 +44,8 @@ namespace MMAP
     // dummy struct to hold map's mmap data
     struct MMapData
     {
+        std::mutex mutex;
+
         MeshDataMap meshData;
 
         // we have to use single dtNavMeshQuery for every instance, since those are not thread safe
@@ -205,6 +208,10 @@ namespace MMAP
 
     LoadResult MMapManager::loadMap(std::string_view basePath, uint32 mapId, uint32 instanceId, int32 x, int32 y)
     {
+        MMapDataSet::iterator mmapItr = loadedMMaps.find(mapId);
+        ASSERT(mmapItr != loadedMMaps.end(), "Invalid mapId %u passed to MMapManager after startup in thread unsafe environment", mapId);
+        std::scoped_lock lock(mmapItr->second->mutex);
+
         // make sure the mmap is loaded and ready to load tiles
         switch (LoadResult mapResult = loadMapData(basePath, mapId, instanceId))
         {
@@ -304,6 +311,10 @@ namespace MMAP
 
     bool MMapManager::loadMapInstance(std::string_view basePath, uint32 meshMapId, uint32 instanceMapId, uint32 instanceId)
     {
+        MMapDataSet::iterator mmapItr = loadedMMaps.find(meshMapId);
+        ASSERT(mmapItr != loadedMMaps.end(), "Invalid mapId %u passed to MMapManager after startup in thread unsafe environment", meshMapId);
+        std::scoped_lock lock(mmapItr->second->mutex);
+
         switch (loadMapData(basePath, meshMapId, instanceId))
         {
             case LoadResult::Success:
@@ -347,6 +358,7 @@ namespace MMAP
         }
 
         MMapData* mmap = itr->second.get();
+        std::scoped_lock lock(mmap->mutex);
         uint32 packedGridPos = packTileID(x, y);
         for (auto& [instanceId, meshData] : mmap->meshData)
         {
@@ -382,6 +394,7 @@ namespace MMAP
             return;
         }
 
+        std::scoped_lock lock(itr->second->mutex);
         if (!isRebuildingTilesEnabledOnMap(mapId))
         {
             if (MeshDataMap::node_type meshNode = itr->second->RemoveMeshData(mapId, 0))
@@ -418,6 +431,7 @@ namespace MMAP
         }
 
         MMapData* mmap = itr->second.get();
+        std::scoped_lock lock(mmap->mutex);
         std::size_t erased = mmap->navMeshQueries.erase({ instanceMapId, instanceId });
         if (!erased)
             TC_LOG_DEBUG("maps", "MMAP:unloadMapInstance: Asked to unload not loaded dtNavMeshQuery mapId {:04} instanceId {}", instanceMapId, instanceId);
@@ -451,6 +465,7 @@ namespace MMAP
         if (itr == loadedMMaps.end())
             return nullptr;
 
+        std::scoped_lock lock(itr->second->mutex);
         MeshDataMap::iterator meshItr = itr->second->FindMeshData(mapId, instanceId);
         if (meshItr == itr->second->meshData.end())
             return nullptr;
@@ -464,6 +479,7 @@ namespace MMAP
         if (itr == loadedMMaps.end())
             return nullptr;
 
+        std::scoped_lock lock(itr->second->mutex);
         auto queryItr = itr->second->navMeshQueries.find({ instanceMapId, instanceId });
         if (queryItr == itr->second->navMeshQueries.end())
             return nullptr;
