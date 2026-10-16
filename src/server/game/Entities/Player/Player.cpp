@@ -1256,7 +1256,7 @@ bool Player::TeleportTo(TeleportLocation const& teleportLocation, TeleportToOpti
     if (duel && GetMapId() != teleportLocation.Location.GetMapId() && GetMap()->GetGameObject(m_playerData->DuelArbiter))
         DuelComplete(DUEL_FLED);
 
-    if (GetMapId() == teleportLocation.Location.GetMapId() && (!teleportLocation.InstanceId || GetInstanceId() == teleportLocation.InstanceId))
+    if (IsInWorld() && GetMapId() == teleportLocation.Location.GetMapId() && (!teleportLocation.InstanceId || GetInstanceId() == teleportLocation.InstanceId))
     {
         SetTeleportState(TeleportState::Initiated);
         //if teleport spell is cast in Unit::Update() func
