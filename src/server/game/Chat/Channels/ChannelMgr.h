@@ -21,6 +21,7 @@
 #include "ObjectGuid.h"
 #include "ObjectGuidSequenceGenerator.h"
 #include "SharedDefines.h"
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -48,6 +49,8 @@ class TC_GAME_API ChannelMgr
         static Channel* GetChannelForPlayerByNamePart(std::string const& namePart, Player* playerSearcher);
         static Channel* GetChannelForPlayerByGuid(ObjectGuid channelGuid, Player* playerSearcher);
         static AreaTableEntry const* SpecialLinkedArea;
+
+        static std::mutex& GetLock();
 
         void SaveToDB();
         Channel* GetSystemChannel(uint32 channelId, AreaTableEntry const* zoneEntry = nullptr);

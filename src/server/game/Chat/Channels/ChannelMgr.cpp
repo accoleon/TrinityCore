@@ -115,6 +115,12 @@ ChannelMgr::~ChannelMgr()
     TC_LOG_INFO("server.loading", ">> Loaded {} custom chat channels in {} ms", count, GetMSTimeDiffToNow(oldMSTime));
 }
 
+/*static*/ std::mutex& ChannelMgr::GetLock()
+{
+    static std::mutex lock;
+    return lock;
+}
+
 /*static*/ ChannelMgr* ChannelMgr::ForTeam(Team team)
 {
     static ChannelMgr allianceChannelMgr(ALLIANCE);

@@ -4763,6 +4763,8 @@ void Player::LeftChannel(Channel* c)
 
 void Player::CleanupChannels()
 {
+    std::scoped_lock lock(ChannelMgr::GetLock());
+
     while (!m_channels.empty())
     {
         Channel* ch = *m_channels.begin();
@@ -4789,6 +4791,8 @@ void Player::UpdateLocalChannels(uint32 newZone)
     ChannelMgr* cMgr = ChannelMgr::ForTeam(GetTeam());
     if (!cMgr)
         return;
+
+    std::scoped_lock lock(ChannelMgr::GetLock());
 
     for (ChatChannelsEntry const* channelEntry : sChatChannelsStore)
     {
