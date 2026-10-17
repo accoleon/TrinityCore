@@ -3258,7 +3258,7 @@ class spell_sha_voltaic_blaze : public SpellScript
 
     void Register() override
     {
-        OnEffectHitTarget += SpellEffectFn(spell_sha_voltaic_blaze::ApplyFlameShock, EFFECT_0, SPELL_EFFECT_SCHOOL_DAMAGE);
+        OnEffectHitTarget += SpellEffectFn(spell_sha_voltaic_blaze::ApplyFlameShock, EFFECT_0, SPELL_EFFECT_DUMMY);
         OnEffectHitTarget += SpellEffectFn(spell_sha_voltaic_blaze::EnergizeMaelstrom, EFFECT_1, SPELL_EFFECT_DUMMY);
     }
 };
